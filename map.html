@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Карта контролю — прототип</title>
+
+<!-- Leaflet (карти) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: system-ui, sans-serif; }
+
+  #map { position: absolute; inset: 0; }
+
+  /* Верхня панель */
+  #topbar {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    z-index: 1000; background: rgba(20,20,20,0.9); color: #fff;
+    padding: 8px 14px; border-radius: 10px; display: flex; gap: 8px;
+    align-items: center; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    font-size: 14px; flex-wrap: wrap; justify-content: center;
+  }
+
+  #topbar button {
+    background: #333; color: #fff; border: 1px solid #555;
+    padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  #topbar button:hover { background: #444; }
+  #topbar button.active { background: #2b7cff; border-color: #2b7cff; }
+  #topbar button.red.active { background: #d33; border-color: #d33; }
+  #topbar button.green.active { background: #2a9d3f; border-color: #2a9d3f; }
+  #topbar button.eraser.active { background: #888; border-color: #888; }
+
+  /* Лічильник */
+  #score {
+    position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+    z-index: 1000; background: rgba(20,20,20,0.9); color: #fff;
+    padding: 10px 16px; border-radius: 10px; display: flex; gap: 20px;
+    font-size: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+  #score .red { color: #ff6b6b; font-weight: bold; }
+  #score .green { color: #6bff8f; font-weight: bold; }
+
+  .leaflet-interactive { cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="topbar">
+  <span>Режим:</span>
+  <button id="btn-view" class="active">👁 Огляд</button>
+  <button id="btn-red" class="red">🔴 Червона</button>
+  <button id="btn-green" class="green">🟢 Зелена</button>
+  <button id="btn-eraser" class="eraser">🧽 Стерти</button>
+  <button id="btn-reset">♻️ Скинути</button>
+</div>
+
+<div id="score">
+  <span>🔴 Червона: <span class="red" id="count-red">0</span></span>
+  <span>🟢 Зелена: <span class="green" id="count-green">0</span></span>
+  <span>⚪ Нейтральні: <span id="count-neutral">0</span></span>
+</div>
+
+<script>
+// ===== 1. Кольори та стан =====
+const COLORS = {
+  neutral: { fill: '#c9c9c9', stroke: '#666' },
+  red:     { fill: '#e74c3c', stroke: '#a93226' },
+  green:   { fill: '#27ae60', stroke: '#1e8449' }
+};
+
+let currentMode = 'view'; // 'view' | 'red' | 'green' | 'eraser'
+let regions = {};         // id -> { layer, owner }
+
+// Зберігання в localStorage
+const STORAGE_KEY = 'map-control-state-v1';
+
+function loadState() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
+  catch { return {}; }
+}
+function saveState() {
+  const data = {};
+  for (const id in regions) data[id] = regions[id].owner;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+}
+
+// ===== 2. Ініціалізація карти =====
+const map = L.map('map', {
+  center: [48.5, 31.5],
+  zoom: 6,
+  minZoom: 4,
+  maxZoom: 12,
+  zoomControl: true
+});
+
+// Світлий фон (без зовнішніх тайлів, щоб працювало офлайн)
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap, &copy; CARTO',
+  subdomains: 'abcd',
+  maxZoom: 19
+}).addTo(map);
+
+// ===== 3. Завантаження областей України =====
+// Використовуємо публічний GeoJSON з областями
+const GEOJSON_URL = 'https://raw.githubusercontent.com/org-scn-design-studio-community/sdkcommunitymaps/master/geojson/Ukraine/Ukraine.geojson';
+
+fetch(GEOJSON_URL)
+  .then(r => r.json())
+  .then(data => {
+    const saved = loadState();
+
+    // Для кожного регіону створюємо полігон
+    L.geoJSON(data, {
+      style: () => ({
+        color: COLORS.neutral.stroke,
+        weight: 1.5,
+        fillColor: COLORS.neutral.fill,
+        fillOpacity: 0.65
+      }),
+      onEachFeature: (feature, layer) => {
+        const id = feature.properties.name || feature.properties.NAME_1 || Math.random().toString(36);
+        const owner = saved[id] || 'neutral';
+
+        regions[id] = { layer, owner };
+        applyStyle(id);
+
+        layer.on('click', () => {
+          if (currentMode === 'view') return;
+          const newOwner = currentMode === 'eraser' ? 'neutral' : currentMode;
+          regions[id].owner = newOwner;
+          applyStyle(id);
+          saveState();
+          updateCounters();
+        });
+
+        layer.on('mouseover', () => layer.setStyle({ weight: 3 }));
+        layer.on('mouseout', () => layer.setStyle({ weight: 1.5 }));
+
+        layer.bindTooltip(id, { sticky: true });
+      }
+    }).addTo(map);
+
+    updateCounters();
+  })
+  .catch(err => {
+    alert('Не вдалося завантажити карту областей. Перевір інтернет.');
+    console.error(err);
+  });
+
+// ===== 4. Застосування стилю =====
+function applyStyle(id) {
+  const r = regions[id];
+  const c = COLORS[r.owner];
+  r.layer.setStyle({
+    fillColor: c.fill,
+    color: c.stroke,
+    fillOpacity: r.owner === 'neutral' ? 0.55 : 0.75
+  });
+}
+
+// ===== 5. Лічильники =====
+function updateCounters() {
+  let red = 0, green = 0, neutral = 0;
+  for (const id in regions) {
+    const o = regions[id].owner;
+    if (o === 'red') red++;
+    else if (o === 'green') green++;
+    else neutral++;
+  }
+  document.getElementById('count-red').textContent = red;
+  document.getElementById('count-green').textContent = green;
+  document.getElementById('count-neutral').textContent = neutral;
+}
+
+// ===== 6. Кнопки режимів =====
+function setMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('#topbar button').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-' + mode).classList.add('active');
+}
+
+document.getElementById('btn-view').onclick = () => setMode('view');
+document.getElementById('btn-red').onclick = () => setMode('red');
+document.getElementById('btn-green').onclick = () => setMode('green');
+document.getElementById('btn-eraser').onclick = () => setMode('eraser');
+
+document.getElementById('btn-reset').onclick = () => {
+  if (!confirm('Скинути всі захоплення?')) return;
+  for (const id in regions) {
+    regions[id].owner = 'neutral';
+    applyStyle(id);
+  }
+  saveState();
+  updateCounters();
+};
+</script>
+
+</body>
+</html>
